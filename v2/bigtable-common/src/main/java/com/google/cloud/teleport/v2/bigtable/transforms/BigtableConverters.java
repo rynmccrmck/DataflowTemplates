@@ -17,6 +17,7 @@ package com.google.cloud.teleport.v2.bigtable.transforms;
 
 import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.auto.value.AutoValue;
+import java.nio.ByteBuffer;
 import java.util.List;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.io.gcp.bigquery.SchemaAndRecord;
@@ -52,10 +53,23 @@ public class BigtableConverters {
       return new AutoValue_BigtableConverters_AvroToMutation.Builder();
     }
 
+
     public Mutation apply(SchemaAndRecord record) {
       GenericRecord row = record.getRecord();
-      String rowkey = row.get(rowkey()).toString();
-      Put put = new Put(Bytes.toBytes(rowkey));
+      Object rowKeyObj = row.get(rowkey());
+      byte[] rowkeyBytes;
+
+      if (rowKeyObj instanceof ByteBuffer) {
+        ByteBuffer buffer = ((ByteBuffer) rowKeyObj).duplicate();
+        rowkeyBytes = new byte[buffer.remaining()];
+        buffer.get(rowkeyBytes);
+      } else if (rowKeyObj instanceof byte[]) {
+        rowkeyBytes = (byte[]) rowKeyObj;
+      } else {
+        rowkeyBytes = Bytes.toBytes(rowKeyObj.toString());
+      }
+
+      Put put = new Put(rowkeyBytes);  // Directly use byte array for Put
 
       List<TableFieldSchema> columns = record.getTableSchema().getFields();
       for (TableFieldSchema column : columns) {
@@ -65,8 +79,20 @@ public class BigtableConverters {
         }
 
         Object columnObj = row.get(columnName);
-        byte[] columnValue = columnObj == null ? null : Bytes.toBytes(columnObj.toString());
-        // TODO(billyjacobson): handle other types and column families
+        byte[] columnValue = null;
+
+        if (columnObj == null) {
+          columnValue = null;
+        } else if (columnObj instanceof ByteBuffer) {
+          ByteBuffer buffer = ((ByteBuffer) columnObj).duplicate();
+          columnValue = new byte[buffer.remaining()];
+          buffer.get(columnValue);
+        } else if (columnObj instanceof byte[]) {
+          columnValue = (byte[]) columnObj;
+        } else {
+          columnValue = Bytes.toBytes(columnObj.toString());
+        }
+
         put.addColumn(Bytes.toBytes(columnFamily()), Bytes.toBytes(columnName), columnValue);
       }
       return put;
