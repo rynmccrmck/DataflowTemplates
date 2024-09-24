@@ -18,7 +18,10 @@ package com.google.cloud.teleport.v2.bigtable.transforms;
 import com.google.api.services.bigquery.model.TableFieldSchema;
 import com.google.auto.value.AutoValue;
 import java.nio.ByteBuffer;
+import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.beam.sdk.io.gcp.bigquery.SchemaAndRecord;
 import org.apache.beam.sdk.transforms.SerializableFunction;
@@ -56,22 +59,40 @@ public class BigtableConverters {
 
     public Mutation apply(SchemaAndRecord record) {
       GenericRecord row = record.getRecord();
+
+      Map<String, String> columnTypes = new HashMap<>();
+      List<TableFieldSchema> columns = record.getTableSchema().getFields();
+      for (TableFieldSchema column : columns) {
+        columnTypes.put(column.getName(), column.getType());
+      }
+
+      String rowkeyType = columnTypes.get(rowkey());
       Object rowKeyObj = row.get(rowkey());
       byte[] rowkeyBytes;
 
-      if (rowKeyObj instanceof ByteBuffer) {
-        ByteBuffer buffer = ((ByteBuffer) rowKeyObj).duplicate();
-        rowkeyBytes = new byte[buffer.remaining()];
-        buffer.get(rowkeyBytes);
-      } else if (rowKeyObj instanceof byte[]) {
-        rowkeyBytes = (byte[]) rowKeyObj;
+      if (rowKeyObj == null) {
+        throw new IllegalArgumentException("Rowkey is null");
+      } else if ("BYTES".equals(rowkeyType)) {
+        if (rowKeyObj instanceof ByteBuffer) {
+          ByteBuffer buffer = ((ByteBuffer) rowKeyObj).duplicate();
+          rowkeyBytes = new byte[buffer.remaining()];
+          buffer.get(rowkeyBytes);
+        } else if (rowKeyObj instanceof byte[]) {
+          // TODO: check if this is needed
+          rowkeyBytes = (byte[]) rowKeyObj;
+        } else if (rowKeyObj instanceof String) {
+          // Decode base64-encoded string
+          rowkeyBytes = Base64.getDecoder().decode((String) rowKeyObj);
+        } else {
+          rowkeyBytes = Bytes.toBytes(rowKeyObj.toString());
+        }
       } else {
+        // For other types, convert to string and then to bytes
         rowkeyBytes = Bytes.toBytes(rowKeyObj.toString());
       }
 
-      Put put = new Put(rowkeyBytes);  // Directly use byte array for Put
+      Put put = new Put(rowkeyBytes);
 
-      List<TableFieldSchema> columns = record.getTableSchema().getFields();
       for (TableFieldSchema column : columns) {
         String columnName = column.getName();
         if (columnName.equals(rowkey())) {
@@ -79,23 +100,35 @@ public class BigtableConverters {
         }
 
         Object columnObj = row.get(columnName);
+        String fieldType = column.getType();
         byte[] columnValue = null;
 
         if (columnObj == null) {
           columnValue = null;
-        } else if (columnObj instanceof ByteBuffer) {
-          ByteBuffer buffer = ((ByteBuffer) columnObj).duplicate();
-          columnValue = new byte[buffer.remaining()];
-          buffer.get(columnValue);
-        } else if (columnObj instanceof byte[]) {
-          columnValue = (byte[]) columnObj;
+        } else if ("BYTES".equals(fieldType)) {
+          if (columnObj instanceof ByteBuffer) {
+
+            ByteBuffer buffer = ((ByteBuffer) columnObj).duplicate();
+            columnValue = new byte[buffer.remaining()];
+            buffer.get(columnValue);
+          } else if (columnObj instanceof byte[]) {
+            columnValue = (byte[]) columnObj;
+          } else if (columnObj instanceof String) {
+            // Decode base64-encoded string
+            columnValue = Base64.getDecoder().decode((String) columnObj);
+          } else {
+            columnValue = Bytes.toBytes(columnObj.toString());
+          }
         } else {
+          // For other types, convert to string and then to bytes
           columnValue = Bytes.toBytes(columnObj.toString());
         }
 
-        put.addColumn(Bytes.toBytes(columnFamily()), Bytes.toBytes(columnName), columnValue);
+        put.addColumn(
+                Bytes.toBytes(columnFamily()), Bytes.toBytes(columnName), columnValue);
       }
       return put;
     }
+
   }
 }
